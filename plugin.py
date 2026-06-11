@@ -1,5 +1,5 @@
 """
-<plugin key="domoticz-xsense" name="XSense Home Security" version="1.0.0" author="Codex">
+<plugin key="domoticz-xsense" name="XSense Home Security" version="1.0.1" author="bblaszkiewicz">
     <description>Domoticz plugin for XSense smoke alarms</description>
     <params>
         <param field="Mode1" label="XSense username" width="200px" required="true" default=""/>
@@ -11,7 +11,10 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -24,6 +27,7 @@ except ImportError:  # pragma: no cover - local development fallback
             self.Name = kwargs.get("Name")
             self.Unit = kwargs.get("Unit")
             self.TypeName = kwargs.get("TypeName")
+            self.DeviceID = kwargs.get("DeviceID")
             self.nValue = 0
             self.sValue = ""
             self.LastLevel = 0
@@ -64,9 +68,6 @@ except ImportError:  # pragma: no cover - local development fallback
 else:
     Devices = globals().get("Devices", {})
     Parameters = globals().get("Parameters", {})
-
-from xsense import XSense
-from xsense.exceptions import APIFailure, AuthFailed, NotFoundError, SessionExpired
 
 
 FIELD_SPECS = {
@@ -116,12 +117,12 @@ def _to_int(value: Any) -> int:
 
 class XSenseDomoticzPlugin:
     def __init__(self):
-        self.api: Optional[XSense] = None
         self.username: Optional[str] = None
         self.password: Optional[str] = None
         self.poll_seconds = 60
         self.ready = False
         self._known_units: Dict[str, int] = {}
+        self.helper_path = Path(__file__).with_name("xsense_helper.py")
 
     def log(self, message: str):
         Domoticz.Log(f"XSense: {message}")
@@ -145,8 +146,6 @@ class XSenseDomoticzPlugin:
             self.sync()
 
     def stop(self):
-        if self.api:
-            self.api.close()
         self.ready = False
 
     def heartbeat(self):
@@ -158,64 +157,53 @@ class XSenseDomoticzPlugin:
         self.sync()
 
     def _connect(self) -> bool:
-        try:
-            api = XSense()
-            api.init()
-            api.login(self.username, self.password)
-            api.load_all()
-            self.api = api
-            self.log("Zalogowano do XSense")
-            return True
-        except (AuthFailed, APIFailure, SessionExpired, OSError, ValueError) as exc:
-            self.error(f"Logowanie nie powiodlo sie: {exc}")
-            self.api = None
+        if not self.helper_path.exists():
+            self.error(f"Brak pliku pomocniczego: {self.helper_path.name}")
             return False
 
+        self.log("Helper gotowy")
+        return True
+
     def sync(self):
-        if not self.api:
+        try:
+            payload = self._fetch_state()
+        except Exception as exc:
+            self.error(f"Blad pobierania danych XSense: {exc}")
+            self.ready = False
             return
 
+        for station in payload.get("stations", []):
+            self._ensure_station_devices(station)
+            self._update_station_devices(station)
+
+    def _fetch_state(self):
+        env = os.environ.copy()
+        env["XSENSE_USERNAME"] = self.username or ""
+        env["XSENSE_PASSWORD"] = self.password or ""
+
+        result = subprocess.run(
+            [sys.executable, str(self.helper_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "unknown error").strip()
+            raise RuntimeError(message)
+
         try:
-            for house in self.api.houses.values():
-                try:
-                    self.api.get_house_state(house)
-                except NotFoundError:
-                    self.log(f"Pominieto stan domu {house.name}: brak danych")
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Nieprawidlowy JSON z helpera: {exc}") from exc
 
-                for station in house.stations.values():
-                    self._sync_station(station)
-        except SessionExpired:
-            self.log("Sesja wygasla, probuje zalogowac sie ponownie")
-            self.ready = self._connect()
-        except APIFailure as exc:
-            self.error(f"Blad XSense: {exc}")
-
-    def _sync_station(self, station):
-        self._ensure_station_devices(station)
-
-        try:
-            self.api.get_station_state(station)
-        except NotFoundError:
-            self.log(f"Pominieto stan {station.sn}: brak danych info")
-        except APIFailure as exc:
-            self.error(f"Nie moge pobrac stanu {station.sn}: {exc}")
-            return
-
-        if station.devices:
-            try:
-                self.api.get_state(station)
-            except APIFailure as exc:
-                self.error(f"Nie moge pobrac stanu urzadzen {station.sn}: {exc}")
-
-        self._update_station_devices(station)
-
-    def _should_track_station(self, station) -> bool:
-        if station.type in TRACKED_TYPES:
+    def _should_track_station(self, station: dict) -> bool:
+        if station.get("type") in TRACKED_TYPES:
             return True
-        return any(field in station.data for field in FIELD_SPECS)
+        return any(field in station.get("values", {}) for field in FIELD_SPECS)
 
-    def _device_name(self, station, field: str) -> str:
-        return f"{station.sn}_{field}"
+    def _device_name(self, station: dict, field: str) -> str:
+        return f"{station['deviceSN']}_{field}"
 
     def _find_device(self, name: str):
         for unit, device in Devices.items():
@@ -249,6 +237,7 @@ class XSenseDomoticzPlugin:
             Name=name,
             Unit=unit,
             TypeName=type_name,
+            DeviceID=name,
             Used=1,
         )
         device.Create()
@@ -256,21 +245,22 @@ class XSenseDomoticzPlugin:
         self.log(f"Utworzono urzadzenie: {name} (Unit {unit}, {type_name})")
         return device
 
-    def _ensure_station_devices(self, station):
+    def _ensure_station_devices(self, station: dict):
         if not self._should_track_station(station):
             return
 
         for field, spec in FIELD_SPECS.items():
             self._ensure_device(self._device_name(station, field), spec["type_name"])
 
-    def _update_station_devices(self, station):
+    def _update_station_devices(self, station: dict):
+        values = station.get("values", {})
         for field, spec in FIELD_SPECS.items():
-            if field not in station.data and field != "batInfo":
+            if field not in values and field != "batInfo":
                 continue
 
-            value = station.data.get(field)
+            value = values.get(field)
             if field == "batInfo" and value is None:
-                value = station.data.get("batLevel")
+                value = values.get("batLevel")
             if value is None:
                 continue
 
