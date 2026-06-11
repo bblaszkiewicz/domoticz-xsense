@@ -44,7 +44,11 @@ def build_snapshot(username: str, password: str) -> Dict[str, List[Dict[str, Any
                     "stationName": station.name,
                     "deviceSN": station.sn,
                     "type": station.type,
-                    "values": dict(station.data),
+                    "values": {
+                        key: value
+                        for key, value in dict(station.data).items()
+                        if key in {"alarmStatus", "muteStatus", "ledLight"}
+                    },
                 }
             )
 

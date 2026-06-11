@@ -81,11 +81,6 @@ FIELD_SPECS = {
         "formatter": lambda value: "On" if _to_bool(value) else "Off",
         "nvalue": lambda value: 1 if _to_bool(value) else 0,
     },
-    "batInfo": {
-        "type_name": "Percentage",
-        "formatter": lambda value: str(_to_int(value)),
-        "nvalue": lambda value: 0,
-    },
     "ledLight": {
         "type_name": "Switch",
         "formatter": lambda value: "On" if _to_bool(value) else "Off",
@@ -106,13 +101,6 @@ def _to_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
-
-
-def _to_int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
 
 
 class XSenseDomoticzPlugin:
@@ -207,7 +195,7 @@ class XSenseDomoticzPlugin:
 
     def _find_device(self, name: str):
         for unit, device in Devices.items():
-            if getattr(device, "Name", None) == name:
+            if getattr(device, "DeviceID", None) == name or getattr(device, "Name", None) == name:
                 try:
                     self._known_units[name] = int(unit)
                 except (TypeError, ValueError):
@@ -240,9 +228,9 @@ class XSenseDomoticzPlugin:
             DeviceID=name,
             Used=1,
         )
-        device.Create()
-        self._known_units[name] = unit
-        self.log(f"Utworzono urzadzenie: {name} (Unit {unit}, {type_name})")
+        if device.Create():
+            self._known_units[name] = unit
+            self.log(f"Utworzono urzadzenie: {name} (Unit {unit}, {type_name})")
         return device
 
     def _ensure_station_devices(self, station: dict):
@@ -255,12 +243,10 @@ class XSenseDomoticzPlugin:
     def _update_station_devices(self, station: dict):
         values = station.get("values", {})
         for field, spec in FIELD_SPECS.items():
-            if field not in values and field != "batInfo":
+            if field not in values:
                 continue
 
             value = values.get(field)
-            if field == "batInfo" and value is None:
-                value = values.get("batLevel")
             if value is None:
                 continue
 
