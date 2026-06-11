@@ -1,3 +1,14 @@
+"""
+<plugin key="domoticz-xsense" name="XSense Home Security" version="1.0.0" author="Codex">
+    <description>Domoticz plugin for XSense smoke alarms</description>
+    <params>
+        <param field="Mode1" label="XSense username" width="200px" required="true" default=""/>
+        <param field="Mode2" label="XSense password" width="200px" required="true" default="" password="true"/>
+        <param field="Mode3" label="Polling interval (seconds)" width="100px" required="false" default="60"/>
+    </params>
+</plugin>
+"""
+
 from __future__ import annotations
 
 import os
